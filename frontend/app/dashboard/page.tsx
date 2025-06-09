@@ -6,7 +6,7 @@ import { FileUpload } from "@/components/file-upload"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
-import { supabase } from "@/lib/supabaseClient"
+import { supabase } from "@/lib/supabase"
 import { Database, BarChart2, ImageIcon, FileText, MoreVertical } from "lucide-react"
 
 export default function DashboardPage() {

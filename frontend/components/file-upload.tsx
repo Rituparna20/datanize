@@ -4,6 +4,7 @@ import { useState } from "react"
 import { Upload } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
+import { supabase } from "@/lib/supabase"
 
 interface FileUploadProps {
   onUploadComplete: (filePath: string) => void
@@ -42,6 +43,13 @@ export function FileUpload({
     const file = event.target.files?.[0]
     if (!file) return
 
+    // Check authentication
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) {
+      toast.error('Please log in to upload files')
+      return
+    }
+
     const error = validateFile(file)
     if (error) {
       toast.error(error)
@@ -49,41 +57,40 @@ export function FileUpload({
     }
 
     setIsUploading(true)
-    const formData = new FormData()
-    formData.append('file', file)
-
     try {
-      const uploadResponse = await fetch('http://localhost:8000/upload/file', {
-        method: 'POST',
-        body: formData,
-      })
-
-      if (!uploadResponse.ok) {
-        const errorData = await uploadResponse.json().catch(() => ({}))
-        throw new Error(errorData.detail || 'Upload failed')
-      }
-
-      const uploadData = await uploadResponse.json()
-      if (!uploadData.file_path) {
-        throw new Error('No file path received from server')
-      }
-
-      // Remove any duplicate 'uploads' in the path
-      const cleanPath = uploadData.file_path.replace(/uploads\/uploads/, 'uploads')
-
-      // Validate the uploaded file
-      const validateResponse = await fetch(`http://localhost:8000/upload/validate-file?file_path=${encodeURIComponent(cleanPath)}`)
-      if (!validateResponse.ok) {
-        const validateError = await validateResponse.json()
-        throw new Error(validateError.detail || 'File validation failed')
-      }
-
-      const validateData = await validateResponse.json()
+      // Generate a unique file name
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
       
-      if (typeof onUploadComplete === 'function') {
-        onUploadComplete(cleanPath)
+      // Upload to Supabase Storage
+      const { data, error: uploadError } = await supabase.storage
+        .from('files')
+        .upload(fileName, file, {
+          cacheControl: '3600',
+          upsert: false
+        })
+
+      if (uploadError) {
+        if (uploadError.message.includes('duplicate')) {
+          throw new Error('A file with this name already exists')
+        }
+        throw uploadError
       }
-      toast.success("File uploaded and validated successfully")
+
+      // Get the public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('files')
+        .getPublicUrl(fileName)
+
+      if (!publicUrl) {
+        throw new Error('Failed to get public URL for uploaded file')
+      }
+
+      // Call the onUploadComplete callback with the file path
+      if (typeof onUploadComplete === 'function') {
+        onUploadComplete(publicUrl)
+      }
+      toast.success("File uploaded successfully")
     } catch (error) {
       console.error('Upload error:', error)
       toast.error(error instanceof Error ? error.message : "Failed to upload file")

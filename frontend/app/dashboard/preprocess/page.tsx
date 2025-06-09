@@ -9,6 +9,9 @@ import { Slider } from "@/components/ui/slider";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { FeatureSelectionTable } from "@/components/feature-selection-table";
+import { supabase } from "@/lib/supabase";
+
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000'
 
 interface FileData {
   path: string;
@@ -63,29 +66,49 @@ export default function PreprocessPage() {
 
     try {
       setIsUploading(true);
-      const formData = new FormData();
-      formData.append('file', file, file.name);
-
-      const response = await fetch('http://localhost:8000/preprocess/upload', {
-        method: 'POST',
-        body: formData,
-        headers: {
-          'Accept': 'application/json',
-        },
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: 'Upload failed' }));
-        throw new Error(errorData.detail || 'Failed to upload file');
+      
+      // Check authentication
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) {
+        toast.error('Please log in to upload files')
+        return
       }
 
-      const data = await response.json();
-      const filePath = data.file_path.replace(/^backend[/\\]/, '').replace(/\\/g, '/');
-      setFileData({ path: filePath });
+      // Generate a unique file name
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
+      
+      // Upload to Supabase Storage
+      const { data, error: uploadError } = await supabase.storage
+        .from('files')
+        .upload(fileName, file, {
+          cacheControl: '3600',
+          upsert: false
+        })
+
+      if (uploadError) {
+        if (uploadError.message.includes('duplicate')) {
+          throw new Error('A file with this name already exists')
+        }
+        throw uploadError
+      }
+
+      // Get the public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('files')
+        .getPublicUrl(fileName)
+
+      if (!publicUrl) {
+        throw new Error('Failed to get public URL for uploaded file')
+      }
+
+      // Set the file data with the public URL
+      const newFileData = { path: publicUrl };
+      setFileData(newFileData);
       toast.success('File uploaded successfully');
       
       // Fetch columns for later use
-      const colResponse = await fetch(`http://localhost:8000/preprocess/columns?file_path=${encodeURIComponent(filePath)}`);
+      const colResponse = await fetch(`${API_BASE_URL}/preprocess/columns?file_path=${encodeURIComponent(publicUrl)}`);
       if (!colResponse.ok) {
         const errorData = await colResponse.json().catch(() => ({ detail: 'Failed to fetch columns' }));
         console.error(errorData);
@@ -102,11 +125,14 @@ export default function PreprocessPage() {
   };
 
   const handleMissingValuesCheck = async (): Promise<void> => {
-    if (!fileData?.path) return;
+    if (!fileData?.path) {
+      toast.error('Please upload a file first');
+      return;
+    }
 
     try {
       setIsLoadingMissing(true);
-      const response = await fetch(`http://localhost:8000/preprocess/missing-values?file_path=${encodeURIComponent(fileData.path)}`, {
+      const response = await fetch(`${API_BASE_URL}/preprocess/missing-values?file_path=${encodeURIComponent(fileData.path)}`, {
         headers: {
           'Accept': 'application/json',
         }
@@ -135,7 +161,10 @@ export default function PreprocessPage() {
   };
 
   const handleMissingValuesSubmit = async (): Promise<void> => {
-    if (!fileData?.path) return;
+    if (!fileData?.path) {
+      toast.error('Please upload a file first');
+      return;
+    }
 
     try {
       setIsLoadingMissing(true);
@@ -151,7 +180,7 @@ export default function PreprocessPage() {
       formData.append('file_path', fileData.path);
       formData.append('methods', JSON.stringify(methodsArray));
 
-      const response = await fetch('http://localhost:8000/preprocess/handle-missing', {
+      const response = await fetch(`${API_BASE_URL}/preprocess/handle-missing`, {
         method: 'POST',
         body: formData,
       });
@@ -162,8 +191,41 @@ export default function PreprocessPage() {
       }
 
       const data = await response.json();
-      const outputPath = data.output_path.replace(/^backend[/\\]/, '').replace(/\\/g, '/');
-      setFileData({ path: outputPath });
+      
+      // Get the processed file from the backend
+      const processedFileResponse = await fetch(`${API_BASE_URL}/preprocess/download?file_path=${encodeURIComponent(data.output_path)}`);
+      if (!processedFileResponse.ok) {
+        throw new Error('Failed to download processed file');
+      }
+      
+      const processedFileBlob = await processedFileResponse.blob();
+      
+      // Generate a unique file name for the processed file
+      const fileName = `processed-${Date.now()}-${Math.random().toString(36).substring(2)}.csv`;
+      
+      // Upload to Supabase Storage
+      const { error: uploadError } = await supabase.storage
+        .from('files')
+        .upload(fileName, processedFileBlob, {
+          cacheControl: '3600',
+          upsert: false
+        });
+
+      if (uploadError) {
+        throw new Error('Failed to upload processed file to storage');
+      }
+
+      // Get the public URL for the processed file
+      const { data: { publicUrl } } = supabase.storage
+        .from('files')
+        .getPublicUrl(fileName);
+
+      if (!publicUrl) {
+        throw new Error('Failed to get public URL for processed file');
+      }
+
+      // Update the file data with the new processed file URL
+      setFileData({ path: publicUrl });
       toast.success('Missing values handled successfully');
       setActiveTab('encoding');
     } catch (error) {

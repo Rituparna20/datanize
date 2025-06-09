@@ -5,6 +5,8 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { FileUpload } from "@/components/file-upload"
 import { useToast } from "@/hooks/use-toast"
+import { API_BASE_URL } from "@/lib/constants"
+import { supabase } from "@/lib/supabase"
 
 interface ColumnSelectorProps {
   xColumn: string
@@ -26,30 +28,34 @@ export function ColumnSelector({
   const { toast } = useToast()
 
   const fetchColumns = async (filePath: string) => {
-    setIsLoading(true)
+    if (!filePath) {
+      console.error("No file path provided")
+      setColumns([])
+      return
+    }
+
     try {
+      setIsLoading(true)
       console.log("Fetching columns for file:", filePath)
-      const response = await fetch(`http://localhost:8000/columns?file_path=${encodeURIComponent(filePath)}`)
+      const response = await fetch(`${API_BASE_URL}/preprocess/columns?file_path=${encodeURIComponent(filePath)}`)
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
+        const errorData = await response.json().catch(() => ({ detail: 'Failed to fetch columns' }))
         throw new Error(errorData.detail || 'Failed to fetch columns')
       }
 
       const data = await response.json()
       console.log("Received columns data:", data)
 
-      if (Array.isArray(data.columns)) {
-        setColumns(data.columns)
-      } else {
-        console.error("Invalid columns data:", data)
-        setColumns([])
-        toast({
-          title: "Error",
-          description: "Invalid column data received from server",
-          variant: "destructive",
-        })
+      if (!data || typeof data !== 'object') {
+        throw new Error('Invalid response format from server')
       }
+
+      if (!data.columns || !Array.isArray(data.columns)) {
+        throw new Error('Invalid columns data received from server')
+      }
+
+      setColumns(data.columns)
     } catch (error) {
       console.error("Failed to fetch columns:", error)
       setColumns([])
@@ -63,10 +69,20 @@ export function ColumnSelector({
     }
   }
 
-  const handleFileUpload = (path: string) => {
-    console.log("File uploaded, received path:", path)
-    onFileUpload(path) // Pass the file path to parent
-    fetchColumns(path)
+  const handleFileUploadComplete = async (filePath: string) => {
+    try {
+      // Call the parent's onFileUpload with the file path
+      onFileUpload(filePath)
+      
+      // Fetch columns for the uploaded file
+      await fetchColumns(filePath)
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to process file",
+        variant: "destructive",
+      })
+    }
   }
 
   return (
@@ -74,7 +90,7 @@ export function ColumnSelector({
       <div className="space-y-2">
         <Label>Upload Dataset</Label>
         <FileUpload 
-          onUploadComplete={handleFileUpload}
+          onUploadComplete={handleFileUploadComplete}
           acceptedFileTypes={[".csv", ".xlsx", ".xls"]}
         />
       </div>

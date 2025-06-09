@@ -20,7 +20,7 @@ interface ImageLabelerProps {
 }
 
 const OBJECT_CLASSES = ["Person", "Car", "Tree", "Animal", "Building"]
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API_URL = 'https://software-datanize.onrender.com'
 
 export function ImageLabeler({ images, setLabels }: ImageLabelerProps) {
   const [currentIndex, setCurrentIndex] = useState(0)

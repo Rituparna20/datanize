@@ -7,7 +7,8 @@ from services.preprocessing import (
     encode_categorical_variables,
     split_data,
     read_data_file,
-    get_categorical_fields
+    get_categorical_fields,
+    download_from_supabase
 )
 from state import get_state, State
 import logging
@@ -21,6 +22,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import zipfile
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/preprocess")
@@ -78,10 +80,22 @@ async def handle_missing_values(
             methods_list = json.loads(methods)
             strategies_dict = {item['variable']: item['strategy'] for item in methods_list}
 
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="File not found")
+        # Download the file from Supabase Storage if it's a URL
+        if file_path.startswith('http'):
+            import requests
+            import tempfile
+            response = requests.get(file_path)
+            response.raise_for_status()
             
-        df = pd.read_csv(file_path)
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
+                tmp.write(response.content)
+                local_file_path = tmp.name
+        else:
+            local_file_path = file_path
+            
+        # Read and process the file
+        df = pd.read_csv(local_file_path)
         rows_before = len(df)
         
         for column, strategy in strategies_dict.items():
@@ -101,10 +115,11 @@ async def handle_missing_values(
                         df[column] = df[column].fillna(0)
                 else:
                      raise ValueError(f"Unknown strategy: {strategy}")
-                
-        # Save the processed file
-        output_path = os.path.join(os.path.dirname(file_path), "processed_data.csv")
-        df.to_csv(output_path, index=False)
+        
+        # Save the processed file to a temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
+            df.to_csv(tmp.name, index=False)
+            output_path = tmp.name
         
         return {
             "message": "Missing values handled successfully",
@@ -115,17 +130,34 @@ async def handle_missing_values(
         }
         
     except Exception as e:
+        logger.error(f"Error handling missing values: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/available-categorical-fields")
 async def get_categorical_fields_endpoint(file_path: str = Query(...)):
     """Get available categorical fields and their unique values."""
     try:
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+        # Check if the file path is a URL
+        if file_path.startswith('http'):
+            import requests
+            import tempfile
+            
+            # Download the file from Supabase Storage
+            response = requests.get(file_path)
+            response.raise_for_status()
+            
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
+                tmp.write(response.content)
+                local_file_path = tmp.name
+        else:
+            # Handle local file
+            if not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+            local_file_path = file_path
         
-        logger.info(f"Getting categorical fields for file: {file_path}")
-        categorical_fields = get_categorical_fields(file_path)
+        logger.info(f"Getting categorical fields for file: {local_file_path}")
+        categorical_fields = get_categorical_fields(local_file_path)
         logger.info(f"Found {len(categorical_fields)} categorical fields")
         return categorical_fields
         
@@ -140,14 +172,39 @@ async def encode_labels_endpoint(
 ):
     """Encode categorical variables using specified methods."""
     try:
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="File not found")
+        # Check if the file path is a URL
+        if file_path.startswith('http'):
+            import requests
+            import tempfile
+            
+            # Download the file from Supabase Storage
+            response = requests.get(file_path)
+            response.raise_for_status()
+            
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
+                tmp.write(response.content)
+                local_file_path = tmp.name
+        else:
+            # Handle local file
+            if not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail="File not found")
+            local_file_path = file_path
             
         # Parse the fields JSON string
         fields_dict = json.loads(fields)
         
         # Perform encoding
-        result = encode_categorical_variables(file_path, fields_dict)
+        result = encode_categorical_variables(local_file_path, fields_dict)
+        
+        # Clean up temporary file if it was created
+        if file_path.startswith('http'):
+            try:
+                os.unlink(local_file_path)
+                logger.info(f"Cleaned up temporary file: {local_file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary file {local_file_path}: {str(e)}")
+        
         return result
     except Exception as e:
         logger.error(f"Error encoding labels: {str(e)}")
@@ -181,26 +238,34 @@ def split_data_endpoint(req: SplitDataRequest, state: State = Depends(get_state)
 
 @router.get("/download")
 async def download_file(file_path: str):
-    """Download a file from the uploads directory."""
+    """Download a file from either the uploads directory or a temporary file."""
     try:
-        # Clean up file path and ensure it's within uploads directory
+        # Check if the file exists directly
+        if os.path.exists(file_path):
+            return FileResponse(file_path, filename=os.path.basename(file_path))
+        
+        # If not, check in the uploads directory
         clean_path = file_path.replace('/', os.sep).replace('\\', os.sep)
         abs_path = os.path.join("uploads", clean_path)
         
-        # Security check: ensure the path is within uploads directory
-        if not os.path.abspath(abs_path).startswith(os.path.abspath("uploads")):
-            raise HTTPException(status_code=400, detail="Invalid file path")
+        if os.path.exists(abs_path):
+            return FileResponse(abs_path, filename=os.path.basename(abs_path))
+        
+        # If the file is a URL (from Supabase), download it
+        if file_path.startswith('http'):
+            import requests
+            import tempfile
             
-        if not os.path.exists(abs_path):
-            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+            response = requests.get(file_path)
+            response.raise_for_status()
             
-        return FileResponse(
-            abs_path,
-            media_type="application/octet-stream",
-            filename=os.path.basename(abs_path)
-        )
-    except HTTPException:
-        raise
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
+                tmp.write(response.content)
+                return FileResponse(tmp.name, filename=os.path.basename(file_path))
+        
+        raise HTTPException(status_code=404, detail="File not found")
+        
     except Exception as e:
         logger.error(f"Error downloading file: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -208,10 +273,8 @@ async def download_file(file_path: str):
 @router.get("/missing-values")
 async def get_missing_values(file_path: str):
     try:
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="File not found")
-            
-        df = pd.read_csv(file_path)
+        # The file_path is now a Supabase URL, which will be handled by read_data_file
+        df = read_data_file(file_path)
         missing_info = {}
         
         for column in df.columns:
@@ -228,6 +291,7 @@ async def get_missing_values(file_path: str):
         }
         
     except Exception as e:
+        logger.error(f"Error in missing values check: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/upload")
@@ -251,10 +315,8 @@ async def upload_file(file: UploadFile = File(...)):
 @router.get("/columns")
 async def get_columns(file_path: str):
     try:
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-            
-        df = pd.read_csv(file_path)
+        # The file_path is now a Supabase URL, which will be handled by read_data_file
+        df = read_data_file(file_path)
         return {
             "columns": df.columns.tolist()
         }
@@ -295,4 +357,40 @@ async def download_split_files(request: Request):
         raise
     except Exception as e:
         logger.error(f"Error creating zip file: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def read_data_file(file_path: str) -> pd.DataFrame:
+    try:
+        # Check if the file path is a URL
+        parsed_url = urlparse(file_path)
+        if parsed_url.scheme in ['http', 'https']:
+            # Download the file from Supabase
+            local_path = download_from_supabase(file_path)
+            try:
+                # Determine file type and read accordingly
+                if local_path.endswith(('.xlsx', '.xls')):
+                    df = pd.read_excel(local_path)
+                else:
+                    df = pd.read_csv(local_path)
+            except Exception as e:
+                logger.error(f"Error reading downloaded file {local_path}: {str(e)}")
+                raise
+            finally:
+                # Clean up the temporary file
+                try:
+                    os.unlink(local_path)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary file {local_path}: {str(e)}")
+            return df
+        else:
+            # Handle local file
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+                
+            if file_path.endswith(('.xlsx', '.xls')):
+                return pd.read_excel(file_path)
+            else:
+                return pd.read_csv(file_path)
+    except Exception as e:
+        logger.error(f"Error reading file {file_path}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

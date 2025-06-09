@@ -41,7 +41,7 @@ export function FeatureSelectionTable({
 
     setIsProcessing(true)
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/feature/`, {
+      const response = await fetch(`https://software-datanize.onrender.com/feature/`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -79,7 +79,7 @@ export function FeatureSelectionTable({
   const handleDownload = async () => {
     setDownloading(true)
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/feature/download`, {
+      const response = await fetch(`https://software-datanize.onrender.com/feature/download`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ method: featureMethod, file_path: filePath }),

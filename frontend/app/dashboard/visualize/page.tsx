@@ -8,6 +8,7 @@ import { ColumnSelector } from "@/components/column-selector"
 import { ChartPreview } from "@/components/chart-preview"
 import { toast } from "sonner"
 import { Loader2 } from "lucide-react"
+import { supabase } from "@/lib/supabase"
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 const VALID_CHART_TYPES = ['bar', 'line', 'pie', 'scatter']
@@ -28,6 +29,9 @@ export default function VisualizePage() {
   const [filePath, setFilePath] = useState("")
   const [isExporting, setIsExporting] = useState(false)
   const labels_data = []  // Store labels data in memory
+  const [isUploading, setIsUploading] = useState(false)
+  const [fileData, setFileData] = useState<{ path: string } | null>(null)
+  const [columns, setColumns] = useState<string[]>([])
 
   const validateInputs = () => {
     if (!filePath) {
@@ -54,17 +58,80 @@ export default function VisualizePage() {
     return true
   }
 
-  const handleFileUpload = (path: string) => {
-    if (!path) {
-      toast.error("Upload Failed", {
-        description: "No file path received"
-      })
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('File size should be less than 10MB')
       return
     }
+
+    try {
+      setIsUploading(true)
+      
+      // Check authentication
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) {
+        toast.error('Please log in to upload files')
+        return
+      }
+
+      // Generate a unique file name
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
+      
+      // Upload to Supabase Storage
+      const { data, error: uploadError } = await supabase.storage
+        .from('files')
+        .upload(fileName, file, {
+          cacheControl: '3600',
+          upsert: false
+        })
+
+      if (uploadError) {
+        if (uploadError.message.includes('duplicate')) {
+          throw new Error('A file with this name already exists')
+        }
+        throw uploadError
+      }
+
+      // Get the public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('files')
+        .getPublicUrl(fileName)
+
+      if (!publicUrl) {
+        throw new Error('Failed to get public URL for uploaded file')
+      }
+
+      // Set the file data with the public URL
+      const newFileData = { path: publicUrl }
+      setFileData(newFileData)
+      setFilePath(publicUrl)
+      toast.success('File uploaded successfully')
+      
+      // Fetch columns for later use
+      const colResponse = await fetch(`${API_BASE_URL}/preprocess/columns?file_path=${encodeURIComponent(publicUrl)}`)
+      if (!colResponse.ok) {
+        const errorData = await colResponse.json().catch(() => ({ detail: 'Failed to fetch columns' }))
+        console.error(errorData)
+        return
+      }
+      const colData = await colResponse.json()
+      setColumns(colData.columns)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to upload file')
+      console.error(error)
+    } finally {
+      setIsUploading(false)
+    }
+  }
+
+  // Add a wrapper function that matches the ColumnSelector's expected prop type
+  const handleFileUploadWrapper = (path: string) => {
     setFilePath(path)
-    // Reset selections when new file is uploaded
-    setXColumn("")
-    setYColumn("")
+    setFileData({ path })
   }
 
   const handleExportToPPT = async () => {
@@ -74,15 +141,9 @@ export default function VisualizePage() {
 
     try {
       setIsExporting(true)
+      toast.info("Exporting chart to PowerPoint...")
 
       // First fetch the chart data
-      console.log('Fetching chart data with:', {
-        file_path: filePath,
-        x_col: xColumn,
-        y_col: yColumn,
-        chart_type: chartType
-      })
-
       const chartResponse = await fetch(`${API_BASE_URL}/visualize`, {
         method: 'POST',
         headers: {
@@ -90,7 +151,7 @@ export default function VisualizePage() {
           'Accept': 'application/json'
         },
         body: JSON.stringify({
-          file_path: filePath,
+          file_path: fileData?.path,
           x_col: xColumn,
           y_col: yColumn,
           chart_type: chartType
@@ -103,7 +164,6 @@ export default function VisualizePage() {
       }
 
       const chartData = await chartResponse.json() as ChartResponse
-      console.log('Received chart data:', chartData)
 
       if (!chartData || !chartData.chart_data || !Array.isArray(chartData.chart_data)) {
         throw new Error('Invalid chart data received from server')
@@ -127,52 +187,41 @@ export default function VisualizePage() {
         y_column: yColumn
       }
 
-      // Then export to PPT
-      console.log('Sending export request with:', exportData)
-
-      const response = await fetch(`${API_BASE_URL}/export-ppt`, {
-        method: 'POST',
+      // Send chart data to backend for PPT generation
+      const response = await fetch(`${API_BASE_URL}/visualize/export-ppt`, {
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
+          "Content-Type": "application/json",
         },
-        body: JSON.stringify(exportData)
+        body: JSON.stringify(exportData),
       })
 
       if (!response.ok) {
         const errorData = await response.json()
-        console.error('Export error response:', errorData)
-        throw new Error(errorData.detail || 'Failed to export chart to PPT')
+        throw new Error(errorData.detail || "Failed to export to PowerPoint")
       }
 
+      // Get the blob from the response
       const blob = await response.blob()
-      if (!blob || blob.size === 0) {
-        throw new Error('Received empty PPT file from server')
-      }
-
+      
+      // Create a download link for the PPT file
       const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'chart_presentation.pptx'
-      document.body.appendChild(a)
-      a.click()
+      const link = document.createElement("a")
+      link.href = url
+      link.download = "chart_presentation.pptx"
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
       window.URL.revokeObjectURL(url)
-      document.body.removeChild(a)
-      
-      toast.success("PowerPoint presentation exported successfully!")
+
+      toast.success("PowerPoint presentation downloaded successfully!")
     } catch (error) {
-      console.error('Export error:', error)
-      let errorMessage = 'Failed to export chart to PPT'
-      
+      console.error("Error exporting to PPT:", error)
       if (error instanceof Error) {
-        errorMessage = error.message
-      } else if (typeof error === 'object' && error !== null) {
-        errorMessage = JSON.stringify(error)
+        toast.error(error.message)
+      } else {
+        toast.error("Failed to export to PowerPoint")
       }
-      
-      toast.error("Export Failed", {
-        description: errorMessage
-      })
     } finally {
       setIsExporting(false)
     }
@@ -197,7 +246,7 @@ export default function VisualizePage() {
               setXColumn={setXColumn} 
               yColumn={yColumn} 
               setYColumn={setYColumn}
-              onFileUpload={handleFileUpload}
+              onFileUpload={handleFileUploadWrapper}
             />
             <ChartSelector chartType={chartType} setChartType={setChartType} />
           </CardContent>

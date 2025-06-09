@@ -5,6 +5,9 @@ from sklearn.model_selection import train_test_split
 import os
 import json
 import logging
+import requests
+import tempfile
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +21,60 @@ def set_file_path(path: str):
 def get_file_path():
     return global_file_path
 
+def download_from_supabase(url: str) -> str:
+    """Download a file from Supabase Storage and return the local path."""
+    try:
+        # Get the file extension from the URL
+        file_ext = os.path.splitext(urlparse(url).path)[1]
+        if not file_ext:
+            file_ext = '.csv'  # Default to .csv if no extension found
+            
+        # Create a temporary file with the correct extension
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+            # Download the file
+            response = requests.get(url)
+            response.raise_for_status()
+            
+            # Write the content to the temporary file
+            tmp.write(response.content)
+            return tmp.name
+    except Exception as e:
+        logger.error(f"Error downloading file from Supabase: {str(e)}")
+        raise
+
 def read_data_file(file_path: str) -> pd.DataFrame:
     """Read a data file and return a pandas DataFrame."""
     try:
-        if file_path.endswith('.csv'):
-            return pd.read_csv(file_path)
+        # Check if the file path is a URL
+        parsed_url = urlparse(file_path)
+        if parsed_url.scheme in ['http', 'https']:
+            # Download the file from Supabase
+            local_path = download_from_supabase(file_path)
+            try:
+                # Determine file type and read accordingly
+                if local_path.endswith(('.xlsx', '.xls')):
+                    df = pd.read_excel(local_path)
+                else:
+                    df = pd.read_csv(local_path)
+            except Exception as e:
+                logger.error(f"Error reading downloaded file {local_path}: {str(e)}")
+                raise
+            finally:
+                # Clean up the temporary file
+                try:
+                    os.unlink(local_path)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary file {local_path}: {str(e)}")
+            return df
         else:
-            raise ValueError("Unsupported file format")
+            # Handle local file
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+                
+            if file_path.endswith(('.xlsx', '.xls')):
+                return pd.read_excel(file_path)
+            else:
+                return pd.read_csv(file_path)
     except Exception as e:
         logger.error(f"Error reading file {file_path}: {str(e)}")
         raise
@@ -73,6 +123,7 @@ def handle_missing_values(file_path: str, strategies: dict) -> dict:
 def get_categorical_fields(file_path: str) -> list:
     """Get only object dtype fields and their unique values from the dataset for encoding."""
     try:
+        # Read the file
         df = read_data_file(file_path)
         categorical_fields = []
         
@@ -90,6 +141,15 @@ def get_categorical_fields(file_path: str) -> list:
         logger.info(f"Found {len(categorical_fields)} object dtype categorical fields in {file_path}")
         for field in categorical_fields:
             logger.info(f"Field: {field['variable']}, Unique values: {len(field['uniqueValues'])}")
+        
+        # Clean up temporary file if it's not in the uploads directory
+        if file_path.startswith('/tmp') or file_path.startswith(tempfile.gettempdir()):
+            try:
+                os.unlink(file_path)
+                logger.info(f"Cleaned up temporary file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary file {file_path}: {str(e)}")
+        
         return categorical_fields
     except Exception as e:
         logger.error(f"Error getting object dtype categorical fields from {file_path}: {str(e)}")
@@ -98,6 +158,7 @@ def get_categorical_fields(file_path: str) -> list:
 def encode_categorical_variables(file_path: str, encoding_config: dict) -> dict:
     """Encode categorical variables using specified encoding methods."""
     try:
+        # Read the file
         df = read_data_file(file_path)
         encoders = {}
         encoded_data = df.copy()
@@ -132,14 +193,16 @@ def encode_categorical_variables(file_path: str, encoding_config: dict) -> dict:
                     "categories": ohe.categories_[0].tolist()
                 }
         
-        # Save the encoded data
-        output_path = os.path.join(os.path.dirname(file_path), "encoded_data.csv")
-        encoded_data.to_csv(output_path, index=False)
+        # Save the encoded data to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp:
+            encoded_data.to_csv(tmp.name, index=False)
+            output_path = tmp.name
         
-        # Save the encoders for future reference
-        encoder_path = os.path.join(os.path.dirname(file_path), "encoders.json")
-        with open(encoder_path, 'w') as f:
-            json.dump(encoders, f)
+        # Save the encoders to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as tmp:
+            with open(tmp.name, 'w') as f:
+                json.dump(encoders, f)
+            encoder_path = tmp.name
         
         return {
             "message": "Encoding completed successfully",

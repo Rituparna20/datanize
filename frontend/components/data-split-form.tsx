@@ -47,7 +47,7 @@ export function DataSplitForm({ filePath, columns, onSplitComplete }: DataSplitF
 
     setIsProcessing(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/preprocess/split`, {
+      const response = await fetch(`https://software-datanize.onrender.com/preprocess/split`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -90,7 +90,7 @@ export function DataSplitForm({ filePath, columns, onSplitComplete }: DataSplitF
       // Clean up file path - remove any duplicate 'uploads' folders
       const cleanPath = filePath.replace(/uploads[\/\\]uploads/, 'uploads');
       
-      const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      const backendUrl = 'https://software-datanize.onrender.com';
       const downloadUrl = `${backendUrl}/preprocess/download?file_path=${encodeURIComponent(cleanPath)}`;
       
       const response = await fetch(downloadUrl);

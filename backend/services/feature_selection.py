@@ -146,42 +146,63 @@ def pls_selection(file_path):
 
 def correlation_selection(file_path):
     """Perform correlation-based feature selection"""
-    df = read_data_file(file_path)
+    try:
+        df = read_data_file(file_path)
 
-    if df is None or df.empty:
-        raise ValueError("Data file is empty or could not be loaded.")
+        if df is None or df.empty:
+            raise ValueError("Data file is empty or could not be loaded.")
 
-    # Sanity check: dataset must have at least 2 columns
-    if df.shape[1] < 2:
-        raise ValueError("Dataset must contain at least one feature and one target column.")
+        # Sanity check: dataset must have at least 2 columns
+        if df.shape[1] < 2:
+            raise ValueError("Dataset must contain at least one feature and one target column.")
 
-    # Separate numeric and categorical features
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
+        # Separate numeric and categorical features
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
 
-    target_col = df.columns[-1]
-    feature_scores = {}
+        target_col = df.columns[-1]
+        feature_scores = {}
 
-    if numeric_cols:
-        numeric_features = [col for col in numeric_cols if col != target_col]
-        y = df[target_col]
-        for feature in numeric_features:
-            correlation, _ = pearsonr(df[feature], y)
-            feature_scores[feature] = float(np.abs(correlation))
+        # Handle numeric features
+        if numeric_cols:
+            numeric_features = [col for col in numeric_cols if col != target_col]
+            if target_col in numeric_cols:
+                y = df[target_col]
+                for feature in numeric_features:
+                    try:
+                        # Drop rows with NaN values for this specific feature-target pair
+                        valid_data = df[[feature, target_col]].dropna()
+                        if len(valid_data) > 0:
+                            correlation, _ = pearsonr(valid_data[feature], valid_data[target_col])
+                            feature_scores[feature] = float(np.abs(correlation))
+                    except Exception as e:
+                        logger.warning(f"Could not calculate correlation for feature {feature}: {str(e)}")
+                        feature_scores[feature] = 0.0
 
-    # For categorical features, use chi-square test
-    for feature in categorical_cols:
-        if feature != target_col:
-            contingency = pd.crosstab(df[feature], df[target_col])
-            chi2, _, _, _ = chi2_contingency(contingency)
-            importance = chi2 / (contingency.shape[0] * contingency.shape[1])
-            feature_scores[feature] = float(importance)
+        # Handle categorical features
+        for feature in categorical_cols:
+            if feature != target_col:
+                try:
+                    # Drop rows with NaN values
+                    valid_data = df[[feature, target_col]].dropna()
+                    if len(valid_data) > 0:
+                        contingency = pd.crosstab(valid_data[feature], valid_data[target_col])
+                        if contingency.size > 0:
+                            chi2, _, _, _ = chi2_contingency(contingency)
+                            importance = chi2 / (contingency.shape[0] * contingency.shape[1])
+                            feature_scores[feature] = float(importance)
+                except Exception as e:
+                    logger.warning(f"Could not calculate chi-square for feature {feature}: {str(e)}")
+                    feature_scores[feature] = 0.0
 
-    # Save the processed data
-    output_path = save_processed_data(df, file_path)
+        # Save the processed data
+        output_path = save_processed_data(df, file_path)
 
-    return {
-        "method": "correlation",
-        "feature_scores": feature_scores,
-        "output_path": output_path
-    }
+        return {
+            "method": "correlation",
+            "feature_scores": feature_scores,
+            "output_path": output_path
+        }
+    except Exception as e:
+        logger.error(f"Error in correlation selection: {str(e)}")
+        raise ValueError(f"Error in correlation selection: {str(e)}")

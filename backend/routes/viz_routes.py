@@ -2,34 +2,63 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from models.schemas import VisualizationRequest, ExportToPPTRequest
 from services.visualization import generate_chart_data, export_to_ppt
+from services.preprocessing import download_from_supabase
 import os
 import logging
+from urllib.parse import urlparse
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-router = APIRouter()
 
-@router.post("/visualize")
+router = APIRouter(prefix="/visualize")
+
+@router.post("/")
 async def create_visualization(req: VisualizationRequest):
     """Generate chart data from the input file and selected columns."""
     try:
         logger.info(f"Generating {req.chart_type} chart for file: {req.file_path}")
         
-        # Validate file exists
-        if not os.path.exists(req.file_path):
-            raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
+        # Check if the file path is a URL
+        parsed_url = urlparse(req.file_path)
+        if parsed_url.scheme in ['http', 'https']:
+            # Download the file from Supabase
+            local_path = download_from_supabase(req.file_path)
+            try:
+                # Generate chart data
+                chart_data = generate_chart_data(
+                    file_path=local_path,
+                    x_col=req.x_col,
+                    y_col=req.y_col,
+                    chart_type=req.chart_type
+                )
+                return {
+                    "chart_data": chart_data,
+                    "message": "Chart data generated successfully"
+                }
+            finally:
+                # Clean up the temporary file
+                try:
+                    os.unlink(local_path)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temporary file {local_path}: {str(e)}")
+        else:
+            # Handle local file
+            if not os.path.exists(req.file_path):
+                raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
 
-        # Generate chart data
-        chart_data = generate_chart_data(
-            file_path=req.file_path,
-            x_col=req.x_col,
-            y_col=req.y_col,
-            chart_type=req.chart_type
-        )
+            # Generate chart data
+            chart_data = generate_chart_data(
+                file_path=req.file_path,
+                x_col=req.x_col,
+                y_col=req.y_col,
+                chart_type=req.chart_type
+            )
 
-        return {
-            "chart_data": chart_data,
-            "message": "Chart data generated successfully"
-        }
+            return {
+                "chart_data": chart_data,
+                "message": "Chart data generated successfully"
+            }
 
     except ValueError as e:
         logger.error(f"Validation error in chart generation: {str(e)}")
@@ -40,6 +69,7 @@ async def create_visualization(req: VisualizationRequest):
 
 @router.post("/export-ppt")
 async def export_chart_to_ppt(request: ExportToPPTRequest):
+    """Export chart data to a PowerPoint presentation."""
     try:
         # Validate request data
         if not request.chart_data:
@@ -87,18 +117,13 @@ async def export_chart_to_ppt(request: ExportToPPTRequest):
             
         logger.info(f"Successfully created PPT file at: {output_path}")
         
-        # Return the file as a response
+        # Return the file directly
         return FileResponse(
-            output_path,
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            filename="chart_presentation.pptx"
+            path=output_path,
+            filename="chart_presentation.pptx",
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
         
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Error exporting to PPT: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to export chart to PPT: {str(e)}"
-        )
+        logger.error(f"Error in PPT export: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

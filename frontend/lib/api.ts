@@ -1,5 +1,5 @@
 // API base URL - adjust this to match your backend URL
-const API_BASE_URL = "http://localhost:8000"
+const API_BASE_URL = "https://software-datanize.onrender.com"
 
 // Generic fetch function with error handling
 async function fetchAPI(endpoint: string, options: RequestInit = {}) {

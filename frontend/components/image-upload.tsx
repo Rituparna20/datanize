@@ -5,6 +5,7 @@ import { Upload, ImageIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { supabase } from "@/lib/supabase"
 
 interface ImageUploadProps {
   setImages: (images: string[]) => void
@@ -16,8 +17,7 @@ export function ImageUpload({ setImages }: ImageUploadProps) {
   const [error, setError] = useState<string | null>(null)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   
-
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+  const API_URL = 'https://software-datanize.onrender.com'
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setError(null)
@@ -39,38 +39,48 @@ export function ImageUpload({ setImages }: ImageUploadProps) {
   const handleUpload = async () => {
     if (!selectedFiles) return
     
+    // Check authentication
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) {
+      setError('Please log in to upload images')
+      return
+    }
+    
     setUploading(true)
     setError(null)
     const uploadedPaths: string[] = []
   
     for (const file of Array.from(selectedFiles)) {
-      const formData = new FormData()
-      formData.append("file", file)
-  
       try {
-        console.log('Uploading to:', `${API_URL}/image/upload`)
-        const response = await fetch(`${API_URL}/image/upload`, {
-          method: "POST",
-          body: formData,
-        })
-  
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({ detail: response.statusText }))
-          throw new Error(errorData.detail || `Upload failed: ${response.statusText}`)
-        }
-  
-        const data = await response.json()
-        if (!data || !data.file_path) {
-          throw new Error('Invalid response from server')
-        }
-  
-        // Construct the full URL for the image
-        const imageUrl = `${API_URL}/${data.file_path.replace(/^\/+/, '')}`
-        console.log('Image URL:', imageUrl)
-        uploadedPaths.push(imageUrl)
-
-        // Extract dominant color and set background
+        // Generate a unique file name
+        const fileExt = file.name.split('.').pop()
+        const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
         
+        // Upload to Supabase Storage
+        const { data, error } = await supabase.storage
+          .from('images')
+          .upload(fileName, file, {
+            cacheControl: '3600',
+            upsert: false
+          })
+  
+        if (error) {
+          if (error.message.includes('duplicate')) {
+            throw new Error('A file with this name already exists')
+          }
+          throw error
+        }
+  
+        // Get the public URL
+        const { data: { publicUrl } } = supabase.storage
+          .from('images')
+          .getPublicUrl(fileName)
+  
+        if (!publicUrl) {
+          throw new Error('Failed to get public URL for uploaded file')
+        }
+  
+        uploadedPaths.push(publicUrl)
       } catch (error) {
         console.error(`Failed to upload ${file.name}:`, error)
         setError(error instanceof Error ? error.message : 'Failed to upload file')
